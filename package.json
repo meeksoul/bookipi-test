@@ -1,0 +1,17 @@
+{
+  "name": "flash-sale",
+  "private": true,
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev -w server",
+    "dev:worker": "npm run dev:worker -w server",
+    "dev:web": "npm run dev -w web",
+    "build": "npm run build -w server && npm run build -w web",
+    "test": "npm test -w server && npm test -w web",
+    "stress": "npm run stress -w server --",
+    "stress:chaos": "npm run stress:chaos -w server --"
+  }
+}
