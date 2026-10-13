@@ -4,14 +4,14 @@
  *   1. exactly min(stock, users) items are sold (no overselling / underselling)
  *   2. no user succeeds more than once
  *   3. the API's view of every user agrees with the responses they received
- *   4. (optional, --verify-db) the worker persisted exactly the winners to Postgres
+ *   4. (optional, --verify-db) the worker persisted exactly the winners to MongoDB
  *   5. no 5xx / transport errors (skipped with --allow-errors for fault injection)
  *
  * Usage: npm run stress -- --url http://localhost:8080 --users 10000 --stock 500
  */
 import { parseArgs } from 'node:util';
-import pg from 'pg';
 import { Pool } from 'undici';
+import { MongoOrderRepository } from '../src/db/orderRepository.js';
 
 const { values: args } = parseArgs({
   options: {
@@ -24,7 +24,7 @@ const { values: args } = parseArgs({
     'verify-db': { type: 'boolean', default: false },
     /** For fault-injection runs: tolerate 5xx / dropped requests, still enforce the invariants. */
     'allow-errors': { type: 'boolean', default: false },
-    'database-url': { type: 'string', default: process.env.DATABASE_URL ?? 'postgres://flash:flash@localhost:5432/flashsale' },
+    'mongo-url': { type: 'string', default: process.env.MONGO_URL ?? 'mongodb://localhost:27017/flashsale?directConnection=true' },
   },
 });
 
@@ -156,20 +156,16 @@ async function main() {
   }
 
   if (args['verify-db']) {
-    const db = new pg.Client({ connectionString: args['database-url'] });
-    await db.connect();
-    let persisted = 0;
+    const repo = await MongoOrderRepository.connect(args['mongo-url']!);
     const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-      const { rows } = await db.query('SELECT count(*)::int AS n FROM orders WHERE sale_id = $1', [saleId]);
-      persisted = rows[0].n;
-      if (persisted >= serverWinners.size) break;
+    while (Date.now() < deadline && (await repo.countBySale(saleId)) < serverWinners.size) {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    const { rows: users } = await db.query<{ user_id: string }>('SELECT user_id FROM orders WHERE sale_id = $1', [saleId]);
-    await db.end();
-    const sameUsers = users.length === serverWinners.size && users.every((r) => serverWinners.has(r.user_id));
-    checks.push(['worker persisted exactly the winners to Postgres', sameUsers, `${users.length} rows`]);
+    const persisted = await repo.countBySale(saleId);
+    const users = await repo.userIdsBySale(saleId);
+    await repo.close();
+    const sameUsers = persisted === serverWinners.size && users.length === persisted && users.every((u) => serverWinners.has(u));
+    checks.push(['worker persisted exactly the winners to MongoDB', sameUsers, `${persisted} documents`]);
   }
 
   console.log('Correctness');

@@ -1,9 +1,9 @@
 import { Redis } from 'ioredis';
-import pg from 'pg';
+import { MongoClient } from 'mongodb';
 
-/** DB 15 keeps tests away from the dev data in DB 0. */
+/** DB 15 / a separate Mongo database keep tests away from the dev data. */
 export const REDIS_TEST_URL = process.env.REDIS_TEST_URL ?? 'redis://localhost:6379/15';
-export const DATABASE_TEST_URL = process.env.DATABASE_TEST_URL ?? 'postgres://flash:flash@localhost:5432/flashsale';
+export const MONGO_TEST_URL = process.env.MONGO_TEST_URL ?? 'mongodb://localhost:27017/flashsale_test?directConnection=true';
 
 export async function isRedisAvailable(): Promise<boolean> {
   const redis = new Redis(REDIS_TEST_URL, { lazyConnect: true, maxRetriesPerRequest: 0, retryStrategy: () => null });
@@ -18,14 +18,15 @@ export async function isRedisAvailable(): Promise<boolean> {
   }
 }
 
-export async function isPostgresAvailable(): Promise<boolean> {
-  const client = new pg.Client({ connectionString: DATABASE_TEST_URL, connectionTimeoutMillis: 1_000 });
+export async function isMongoAvailable(): Promise<boolean> {
+  const client = new MongoClient(MONGO_TEST_URL, { serverSelectionTimeoutMS: 1_000 });
   try {
     await client.connect();
+    await client.db().command({ ping: 1 });
     return true;
   } catch {
     return false;
   } finally {
-    await client.end().catch(() => {});
+    await client.close().catch(() => {});
   }
 }

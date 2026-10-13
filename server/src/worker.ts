@@ -1,15 +1,15 @@
 import os from 'node:os';
 import { Redis } from 'ioredis';
 import { loadConfig } from './config.js';
-import { PgOrderRepository } from './db/orderRepository.js';
+import { MongoOrderRepository } from './db/orderRepository.js';
 import { OrderWorker } from './worker/OrderWorker.js';
 
 const config = loadConfig();
 
 // Blocking reads need a dedicated connection without the API's short timeouts.
 const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
-const repo = PgOrderRepository.connect(config.databaseUrl);
-await repo.migrate();
+const repo = await MongoOrderRepository.connect(config.mongoUrl);
+await repo.ensureSchema();
 
 const worker = new OrderWorker(redis, repo, {
   consumer: `${os.hostname()}-${process.pid}`,

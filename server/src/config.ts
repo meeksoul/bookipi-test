@@ -28,7 +28,7 @@ export function loadConfig() {
     host: env('HOST', '0.0.0.0'),
     store: env('STORE', 'redis') as 'redis' | 'memory',
     redisUrl: env('REDIS_URL', 'redis://localhost:6379'),
-    databaseUrl: env('DATABASE_URL', 'postgres://flash:flash@localhost:5432/flashsale'),
+    mongoUrl: env('MONGO_URL', 'mongodb://localhost:27017/flashsale?directConnection=true'),
     adminToken: env('ADMIN_TOKEN', 'dev-admin-token'),
     logLevel: env('LOG_LEVEL', 'info'),
     initialSale,

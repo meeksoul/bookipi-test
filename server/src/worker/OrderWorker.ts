@@ -18,7 +18,7 @@ export interface OrderWorkerOptions {
 }
 
 /**
- * Moves successful purchases from the Redis stream into Postgres.
+ * Moves successful purchases from the Redis stream into the order database.
  *
  * Delivery is at-least-once: an entry is ACKed only after it is committed, and
  * entries left pending by a crashed or failing consumer are reclaimed with

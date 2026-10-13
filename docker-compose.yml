@@ -1,6 +1,6 @@
 x-api-env: &api-env
   REDIS_URL: redis://redis:6379
-  DATABASE_URL: postgres://flash:flash@postgres:5432/flashsale
+  MONGO_URL: mongodb://mongo:27017/flashsale?replicaSet=rs0
   ADMIN_TOKEN: ${ADMIN_TOKEN:-dev-admin-token}
   SALE_ID: ${SALE_ID:-launch}
   SALE_STARTS_AT: ${SALE_STARTS_AT:-}
@@ -22,19 +22,24 @@ services:
       timeout: 2s
       retries: 15
 
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: flash
-      POSTGRES_PASSWORD: flash
-      POSTGRES_DB: flashsale
-    ports: ["5432:5432"]
-    volumes: [pg-data:/var/lib/postgresql/data]
+  mongo:
+    image: mongo:8
+    # A replica set (even of one node) is required for majority write concern,
+    # retryable writes and transactions. Production would run 3 data-bearing members.
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports: ["27017:27017"]
+    volumes: [mongo-data:/data/db]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U flash -d flashsale"]
+      # Initialises the replica set on first start, then reports whether this node is primary.
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "try { rs.status() } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongo:27017' }] }) }; quit(db.hello().isWritablePrimary ? 0 : 1)"
       interval: 2s
-      timeout: 2s
-      retries: 15
+      timeout: 5s
+      retries: 30
 
   api:
     build: { context: ., dockerfile: server/Dockerfile }
@@ -57,7 +62,7 @@ services:
     restart: unless-stopped
     depends_on:
       redis: { condition: service_healthy }
-      postgres: { condition: service_healthy }
+      mongo: { condition: service_healthy }
 
   web:
     build: { context: ., dockerfile: web/Dockerfile }
@@ -68,4 +73,4 @@ services:
 
 volumes:
   redis-data:
-  pg-data:
+  mongo-data:
