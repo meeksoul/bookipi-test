@@ -1,6 +1,12 @@
 # Flash Sale System
 
-A high-throughput backend and React frontend for a flash sale of a single product with limited stock: a configurable sale window, strict one-item-per-user, and no overselling under heavy concurrency.
+This app is built with Claude opus 5.5 medium(structure) + grok 4.7 fast(micro tuning). Every code, documentation and test has passed the developer's(me) review. 
+External library or testing tools is excluded on purpose of the easier tester reviews. 
+To establish the concurrency and scalability, the single truth data and the atomic logic stays on the redis memory and multiple workers grab the job in the order, asyncronously.
+If it were only this flash sale, SQL is more appropriate choice because the schema is stable, as a single silent worker error could be disastrous to the customers. But it doesn't mean that nosql is not an option for this case. We just need to control the db schema more and check harder on every step to prevent duplications, db replica logics and failed transactions. I created a flow diagram images on /docs for the easier tester review.  
+This app folows the common practice of flash sales but has a trade-off. When Redis crashes before user order is saved on the Redis disk, user would get the 201 message(order success) but order is failed. To weigh the fairness more, we need to move the stock count(only stock avaiable on the Redis)to the order DB(mongo) but it could seriously damage the first-click win user experience, especially on the high traffic case. 
+
+Purpose: A high-throughput backend and React frontend for a flash sale of a single product with limited stock: a configurable sale window, strict one-item-per-user, and no overselling under heavy concurrency.
 
 - **API**: Node.js 24, TypeScript, Fastify (stateless, horizontally scaled)
 - **Inventory / concurrency control**: Redis 7, one atomic Lua script per purchase
@@ -9,45 +15,42 @@ A high-throughput backend and React frontend for a flash sale of a single produc
 - **Frontend**: React 19 + Vite, served by nginx, which also load-balances the API replicas
 - **Tests**: Vitest (unit, API, Redis/MongoDB integration) and a custom stress / fault-injection harness
 
-| Upcoming | Purchased | Repeat attempt |
-| --- | --- | --- |
-| ![upcoming](docs/screenshot-upcoming.png) | ![success](docs/screenshot-success.png) | ![already purchased](docs/screenshot-already.png) |
-
 ---
 
 ## Quick start
 
-Requires Docker and Node.js 20+ (24 recommended).
+Docker Compose v2 is enough to run the app and try a purchase. Node.js is not required for that path.
 
 ```bash
-npm install
 docker compose up -d --build --wait     # redis, mongo, 3x api, worker, nginx+frontend
-open http://localhost:8080
 ```
 
-By default a sale called `launch` with 100 items opens immediately and runs for 2 hours. Configure it with environment variables before `docker compose up`:
+Open http://localhost:8080 in a browser.
+
+By default a sale called `launch` with 100 items opens immediately and runs for 2 hours. A sale is purchasable only while the current time is inside its window. Configure it with environment variables before `docker compose up`:
 
 ```bash
 SALE_ID=drop-1 SALE_STOCK=500 \
-SALE_STARTS_AT=2026-10-13T10:00:00Z SALE_ENDS_AT=2026-10-13T11:00:00Z \
+SALE_STARTS_AT=2026-01-01T00:00:00Z SALE_ENDS_AT=2027-01-01T00:00:00Z \
 docker compose up -d --build --wait
 ```
 
-The env config only seeds a sale if none exists yet, so restarting a container never resets stock. To start a new sale at runtime (this is what the stress test does):
+The env config only seeds a sale if none exists yet, so restarting a container never resets stock. To start a new sale at runtime (this is what the stress test does), set `endsAt` in the future:
 
 ```bash
 curl -X PUT localhost:8080/api/admin/sale \
   -H 'content-type: application/json' -H 'x-admin-token: dev-admin-token' \
-  -d '{"id":"drop-2","startsAt":"2026-10-13T10:00:00Z","endsAt":"2026-10-13T11:00:00Z","totalStock":50}'
+  -d '{"id":"drop-2","startsAt":"2026-01-01T00:00:00Z","endsAt":"2027-01-01T00:00:00Z","totalStock":50}'
 ```
 
 Stop everything with `docker compose down` (add `-v` to wipe Redis and MongoDB data).
 
 ### Running locally without Docker
 
-The API can run with an in-memory store (single process, no persistence). It is meant for trying the UI only:
+The API can run with an in-memory store (single process, no persistence). It is meant for trying the UI only. This path needs Node.js 20+ (24 recommended).
 
 ```bash
+npm install
 STORE=memory npm run dev:server   # API on :3000
 npm run dev:web                   # Vite on :5173, proxies /api to :3000
 ```
@@ -58,52 +61,19 @@ With Redis and MongoDB available (for example `docker compose up -d redis mongo 
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    U[Browsers] -->|HTTP| LB[nginx<br/>static frontend + load balancer]
-    LB --> A1[API replica 1]
-    LB --> A2[API replica 2]
-    LB --> A3[API replica N]
+![Architecture](docs/architecture.png)
 
-    subgraph Redis [Redis - hot path, in memory]
-      direction TB
-      L[[purchase.lua<br/>atomic: window, dedupe, stock]]
-      K[(stock counter<br/>buyers hash<br/>sale metadata)]
-      S[(orders stream)]
-      L --> K
-      L --> S
-    end
+### When a user purchases
 
-    A1 & A2 & A3 -->|EVALSHA| L
-    A1 & A2 & A3 -->|status / lookup reads| K
+The API answers as soon as one Redis script decides the outcome. Only a successful purchase appends an order, and that write is part of the same atomic step as the stock decrement. MongoDB is updated afterwards, off the request.
 
-    S -->|XREADGROUP / XAUTOCLAIM| W[Order worker<br/>consumer group]
-    W -->|bulk upsert, w: majority| M[(MongoDB replica set<br/>orders: unique saleId + userId)]
-```
+![When a user purchases](docs/purchase-flow.png)
+
+The duplicate check runs before the stock check, so a buyer who already won still sees "already purchased" after a sellout. The client retries a `503` with jittered backoff; a repeat of a purchase that already committed returns `409`, not a second item.
 
 ### Purchase path
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant N as nginx
-    participant A as API replica
-    participant R as Redis
-    participant W as Worker
-    participant M as MongoDB
-
-    C->>N: POST /api/purchases {userId}
-    N->>A: round-robin
-    A->>A: validate + normalise userId, resolve active sale (1s cache)
-    A->>R: EVALSHA purchase.lua
-    Note over R: one atomic step:<br/>window open? (Redis clock)<br/>already bought? (HGET)<br/>stock > 0? (GET)<br/>DECR + HSET + XADD
-    R-->>A: SUCCESS / ALREADY_PURCHASED / SOLD_OUT / NOT_STARTED / ENDED
-    A-->>C: 201 / 409 / 410 / 403
-    W->>R: XREADGROUP (batch of 200)
-    W->>M: bulkWrite upsert ($setOnInsert), w: majority + journal
-    M-->>W: acknowledged by a majority of members
-    W->>R: XACK (only after the majority ack)
-```
+![Purchase path](docs/purchase-path.png)
 
 ### Components and why
 
@@ -232,7 +202,10 @@ Purchase responses always include `outcome`, `message`, `userId` and `purchasedA
 
 ## Tests
 
+Node.js 20 or newer (24 recommended).
+
 ```bash
+npm install
 docker compose up -d redis mongo --wait   # needed for the integration suites
 npm test                                  # server + web
 ```
@@ -266,6 +239,7 @@ The process exits non-zero if any check fails.
 
 ```bash
 docker compose up -d --build --wait
+npm install
 npm run stress -- --verify-db                                    # 10k users x 3 attempts, 500 items
 npm run stress -- --verify-db --users 50000 --stock 2000 --attempts 2 --concurrency 1000
 npm run stress -- --verify-db --users 300 --stock 1000 --attempts 5   # more stock than buyers
